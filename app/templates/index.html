@@ -214,6 +214,11 @@
                         <small class="text-muted">curl 请求的最大等待时间，建议 8~20 秒，保存立即生效</small>
                     </div>
                     <div class="mb-3">
+                        <label>未连接时重连间隔 (秒)</label>
+                        <input type="number" class="form-control" id="cfg-reconnect-interval" min="10" max="600" value="30">
+                        <small class="text-muted">断开后每隔多少秒尝试重连，建议 30~120 秒，保存立即生效</small>
+                    </div>
+                    <div class="mb-3">
                         <label>延迟检测地址</label>
                         <input type="text" class="form-control" id="cfg-latency-check-target" placeholder="留空则使用 VPN 网关 IP">
                         <small class="text-muted">输入 IP 或域名，点击仪表盘"检测延迟"时会 ping 此地址，保存立即生效</small>
@@ -757,6 +762,7 @@
                     health_check_timeout: parseInt(document.getElementById("cfg-health-check-timeout").value) || 8,
                     connection_history_retention_days: parseInt(document.getElementById("cfg-history-retention-days").value) || 30,
                     socks_max_connections: parseInt(document.getElementById("cfg-socks-max-connections").value) || 200,
+                    reconnect_interval: parseInt(document.getElementById("cfg-reconnect-interval").value) || 30,
                 };
                 try {
                     const saveRes = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newCfg) });
@@ -795,6 +801,7 @@
                 document.getElementById("cfg-health-check-timeout").value = cfg.health_check_timeout || 8;
                 document.getElementById("cfg-history-retention-days").value = cfg.connection_history_retention_days || 30;
                 document.getElementById("cfg-socks-max-connections").value = cfg.socks_max_connections || 200;
+                document.getElementById("cfg-reconnect-interval").value = cfg.reconnect_interval || 30;
                 configRegion = cfg.region || "all";
                 if (allNodesCache.length > 0) updateSettingsRegionDropdown();
                 else updateCurrentRegionText();
@@ -827,6 +834,7 @@
                 health_check_timeout: parseInt(document.getElementById("cfg-health-check-timeout").value) || 8,
                 connection_history_retention_days: parseInt(document.getElementById("cfg-history-retention-days").value) || 30,
                 socks_max_connections: parseInt(document.getElementById("cfg-socks-max-connections").value) || 200,
+                reconnect_interval: parseInt(document.getElementById("cfg-reconnect-interval").value) || 30,
             };
             const msg = document.getElementById("settings-msg");
             try {
