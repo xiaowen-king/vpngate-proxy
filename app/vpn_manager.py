@@ -52,6 +52,7 @@ class VpnManager:
         self.history_file = "/data/connection_history.json"
         self.connection_history = self._load_history()
         self._history_clean_thread = None
+        self._reconnect_fail_count = 0          # 自动重连连续失败计数
 
     def set_log_callback(self, cb):
         self._log_callback = cb
@@ -300,7 +301,7 @@ class VpnManager:
             self.disconnect()
             return False
 
-        # 成功获取 IP 后的配置（不再缩进在 else 内）
+        # 成功获取 IP 后的配置
         self.tun_dev = tun_dev
         self.tun_ip = tun_ip
         self.vpn_gateway = vpn_gateway
@@ -322,20 +323,19 @@ class VpnManager:
         self.status["ip_info"] = self.detect_ip(node["ip"])
         self.log(f"SOCKS5 代理已启动: {self.status['socks']}")
 
-        # 记录连接开始时间
         self.status["connected_since"] = datetime.now(timezone.utc).isoformat()
         self.log(f"已记录连接开始时间: {self.status['connected_since']}")
         self.add_connection_record(node)
         self._failed_ips.clear()
+        self._reconnect_fail_count = 0  # 连接成功，重置自动重连失败计数
         return True
 
     def disconnect(self):
-        # 如果有连接开始时间，计算并记录使用时长
         if self.status.get("connected_since") and self.status.get("node_info"):
             try:
                 start = datetime.fromisoformat(self.status["connected_since"])
                 duration = datetime.now(timezone.utc) - start
-                duration_str = str(duration).split('.')[0]   # 只保留到秒
+                duration_str = str(duration).split('.')[0]
                 hostname = self.status["node_info"].get("hostname", "")
                 ip = self.status["node_info"].get("ip", "")
                 self.log(f"节点 {hostname} ({ip}) 已断开，使用时长: {duration_str}")
@@ -354,7 +354,7 @@ class VpnManager:
             try:
                 self.vpn_process.terminate()
                 try:
-                    self.vpn_process.stdout.close()   # 显式关闭管道，防止冲突
+                    self.vpn_process.stdout.close()
                 except Exception:
                     pass
                 self.vpn_process.wait(timeout=3)
@@ -369,7 +369,7 @@ class VpnManager:
                 except Exception:
                     pass
             self.vpn_process = None
-            
+
         if self.socks_server:
             self.socks_server.stop()
             self.socks_server = None
@@ -393,7 +393,6 @@ class VpnManager:
             return "127.0.0.1"
 
     def _load_history(self):
-        """加载历史记录文件，返回列表"""
         if not os.path.exists(self.history_file):
             return []
         try:
@@ -403,7 +402,6 @@ class VpnManager:
             return []
 
     def _save_history(self):
-        """保存历史记录到文件"""
         try:
             with open(self.history_file, "w", encoding="utf-8") as f:
                 json.dump(self.connection_history, f, indent=2, ensure_ascii=False)
@@ -411,7 +409,6 @@ class VpnManager:
             self.log(f"保存连接历史失败: {e}")
 
     def add_connection_record(self, node_info):
-        """添加一条连接记录（开始时调用，end_time为空）"""
         record = {
             "id": str(uuid.uuid4())[:8],
             "hostname": node_info.get("hostname", ""),
@@ -421,11 +418,10 @@ class VpnManager:
             "end_time": None,
             "duration": None
         }
-        self.connection_history.insert(0, record)  # 最新记录放在最前面
+        self.connection_history.insert(0, record)
         self._save_history()
 
     def update_connection_record_end(self, node_ip, end_time=None):
-        """更新最后一条未结束且匹配 IP 的记录"""
         if not end_time:
             end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for rec in self.connection_history:
@@ -438,12 +434,10 @@ class VpnManager:
                 return
 
     def delete_connection_record(self, record_id):
-        """删除指定 ID 的记录"""
         self.connection_history = [r for r in self.connection_history if r["id"] != record_id]
         self._save_history()
 
     def clean_old_history(self):
-        """清理超过保留天数的记录"""
         retention_days = self.config.get("connection_history_retention_days", 30)
         cutoff = datetime.now() - timedelta(days=retention_days)
         self.connection_history = [r for r in self.connection_history if
@@ -451,7 +445,6 @@ class VpnManager:
         self._save_history()
 
     def _history_clean_loop(self):
-        """每天执行一次历史记录清理"""
         while not self._stop_event.is_set():
             time.sleep(86400)
             if self._stop_event.is_set():
@@ -459,8 +452,7 @@ class VpnManager:
             self.clean_old_history()
 
     def _is_tunnel_alive(self):
-        """通过 SOCKS5 代理访问自定义检测地址，任一成功即健康，支持重试与超时配置"""
-        # 1. 检查进程和接口
+        # 检查进程
         if not self.vpn_process or self.vpn_process.poll() is not None:
             self.log("健康检测失败: OpenVPN 进程未运行")
             return False
@@ -479,10 +471,9 @@ class VpnManager:
             self.log(f"健康检测失败: 检查 tun 接口异常 - {e}")
             return False
 
-        # 2. 获取检测地址（优先用户自定义，否则使用默认轻量地址）
+        # 获取检测地址
         raw_urls = self.config.get("health_check_urls", "")
         if raw_urls.strip():
-            import re
             urls = [u.strip() for u in re.split(r'[,\n]', raw_urls) if u.strip()]
             urls = [u if u.startswith('http://') or u.startswith('https://') else f'http://{u}' for u in urls]
         else:
@@ -516,11 +507,9 @@ class VpnManager:
         return False
 
     def measure_latency(self):
-        """执行一次 ping 检测，返回延迟（毫秒），失败返回 -1"""
         if not self.tun_dev or not self.tun_ip:
             return -1
 
-        # 优先使用用户配置的地址，否则用 VPN 网关 IP，最后回退 8.8.8.8
         target = self.config.get("latency_check_target", "").strip()
         if not target:
             target = self.vpn_gateway if self.vpn_gateway else "8.8.8.8"
@@ -539,14 +528,33 @@ class VpnManager:
             return -1
 
     def health_check_loop(self):
+        last_reconnect_time = 0
         while not self._stop_event.is_set():
-            time.sleep(self.health_check_interval)          # 使用配置的间隔
+            time.sleep(self.health_check_interval)
             if not self.status["connected"]:
                 self.health_fail_count = 0
+                # 未连接时自动尝试重连，每 30 秒尝试一次
+                now = time.time()
+                if now - last_reconnect_time > 30:
+                    self.log("检测到未连接，尝试自动重连...")
+                    success, msg = self.auto_connect_next()
+                    if success:
+                        self.log(f"自动重连成功: {msg}")
+                        self._reconnect_fail_count = 0
+                    else:
+                        self.log(f"自动重连失败: {msg}")
+                        self._reconnect_fail_count += 1
+                        if self._reconnect_fail_count >= 3:
+                            self.log("自动重连连续失败 3 次，清空 IP 黑名单以便重新尝试所有节点")
+                            self._failed_ips.clear()
+                            self._reconnect_fail_count = 0
+                    last_reconnect_time = now
                 continue
 
+            # 已连接时的健康检查逻辑
             if self._is_tunnel_alive():
                 self.health_fail_count = 0
+                self._reconnect_fail_count = 0  # 健康时也重置，保持一致性
             else:
                 self.health_fail_count += 1
                 self.log(f"健康检测失败 (连续 {self.health_fail_count} 次)")
@@ -599,13 +607,11 @@ class VpnManager:
             self.connect_node(next_node)
         else:
             self.log("没有预先检测的可用节点，尝试从当前列表中选择...")
-            # 先尝试优先节点
             if self._try_connect_preferred():
                 return
             self.log("所有优先节点均不可用或已失效，尝试普通节点")
             nodes = self.filter_nodes(self.config["region"])
 
-            # 检查是否开启同IP段优先
             prefer_same_subnet = self.config.get("prefer_same_subnet", False)
             subnet_prefix = self.config.get("subnet_prefix_length", 24)
             last_ip = None
@@ -630,7 +636,6 @@ class VpnManager:
                     except Exception:
                         other_nodes.append(node)
 
-                # 优先尝试同子网节点
                 for node in subnet_nodes:
                     if self._stop_event.is_set():
                         break
@@ -642,7 +647,6 @@ class VpnManager:
                         success = self.connect_node(node)
                         if success:
                             return
-                # 再尝试其他节点
                 for node in other_nodes:
                     if self._stop_event.is_set():
                         break
@@ -656,7 +660,6 @@ class VpnManager:
                             return
                 self.log("所有节点均不可用，等待下次检测")
             else:
-                # 未开启优先，使用原有顺序逻辑
                 for node in nodes:
                     if self._stop_event.is_set():
                         break
@@ -674,31 +677,21 @@ class VpnManager:
 
     def auto_connect_next(self):
         """自动尝试优先节点，然后连接下一个节点（跳过当前节点，支持同IP段优先）"""
-        # 获取当前连接的IP
         last_ip = None
         if self.current_node and self.current_node.get("ip"):
             last_ip = self.current_node["ip"]
         elif self.status["node_info"].get("ip"):
             last_ip = self.status["node_info"]["ip"]
 
-        # 先尝试优先节点，但跳过当前连接的IP
         if self._try_connect_preferred(skip_ip=last_ip):
             return True, self.current_node["hostname"]
-        
+
         region = self.config.get("region", "all")
         nodes = self.filter_nodes(region)
         if not nodes:
             self.log("自动连接失败：当前地区没有可用节点")
             return False, "当前地区没有可用节点"
 
-        # 获取上次连接的 IP
-        last_ip = None
-        if self.current_node and self.current_node.get("ip"):
-            last_ip = self.current_node["ip"]
-        elif self.status["node_info"].get("ip"):
-            last_ip = self.status["node_info"]["ip"]
-
-        # 找到当前节点在列表中的位置，从下一个开始尝试
         start_index = 0
         if last_ip:
             for i, node in enumerate(nodes):
@@ -709,7 +702,6 @@ class VpnManager:
         prefer_same_subnet = self.config.get("prefer_same_subnet", False)
         subnet_prefix = self.config.get("subnet_prefix_length", 24)
 
-        # 收集候选节点
         candidates = []
         for i in range(len(nodes)):
             idx = (start_index + i) % len(nodes)
@@ -724,7 +716,6 @@ class VpnManager:
             self.log("自动连接失败：没有其他可用节点")
             return False, "没有其他可用节点"
 
-        # 同子网优先排序
         if prefer_same_subnet and last_ip:
             subnet_nodes = []
             other_nodes = []
@@ -737,7 +728,6 @@ class VpnManager:
                     other_nodes.append(node)
             candidates = subnet_nodes + other_nodes
 
-        # 依次尝试连接
         for node in candidates:
             if self._stop_event.is_set():
                 break
@@ -757,12 +747,10 @@ class VpnManager:
         self.fetch_nodes()
 
         connected = False
-        # 优先尝试连接设置的优先节点
         if self._try_connect_preferred():
             self.log("已连接到优先节点")
             connected = True
         else:
-            # 优先节点未成功，按地区过滤后顺序尝试
             nodes = self.filter_nodes(self.config["region"])
             for node in nodes:
                 if self._stop_event.is_set():
@@ -778,7 +766,6 @@ class VpnManager:
         else:
             self.log("VPN 连接成功建立")
 
-        # 启动所有后台线程
         self._health_thread = threading.Thread(target=self.health_check_loop, daemon=True)
         self._health_thread.start()
         self._bg_check_thread = threading.Thread(target=self.background_check_nodes, daemon=True)
@@ -789,7 +776,6 @@ class VpnManager:
         self._history_clean_thread.start()
 
     def _get_subnet(self, ip, prefix_len=24):
-        """获取IP的前缀网络地址，例如 /24 返回前三段"""
         try:
             network = ipaddress.ip_network(f"{ip}/{prefix_len}", strict=False)
             return network.network_address
@@ -797,7 +783,6 @@ class VpnManager:
             return None
 
     def measure_nodes_latency(self, ips):
-        """并发检测多个 IP 的延迟，返回字典 {ip: latency_ms 或 -1}"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def ping_ip(ip):
@@ -821,15 +806,14 @@ class VpnManager:
                 ip, lat = future.result()
                 results[ip] = lat
         return results
+
     def _try_connect_preferred(self, skip_ip=None):
-        """尝试连接优先节点，可跳过指定IP"""
         if not self.preferred_nodes:
             return False
         for node in self.preferred_nodes:
             if self._stop_event.is_set():
                 break
             if skip_ip and node["ip"] == skip_ip:
-                # 跳过当前连接的IP（不输出日志也可，但为了清晰可添加）
                 continue
             if node["ip"] in self._failed_ips:
                 self.log(f"跳过优先节点 {node['hostname']} ({node['ip']})：之前连接失败")
@@ -839,12 +823,11 @@ class VpnManager:
             if self.connect_node(node):
                 return True
         return False
-    
+
     def stop(self):
         self._stop_event.set()
         self._auto_update_trigger.set()
-    
-        # 清理所有未结束的连接记录（防止异常停止导致记录缺失结束信息）
+
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for rec in self.connection_history:
             if rec.get("end_time") is None:
@@ -856,7 +839,7 @@ class VpnManager:
                 except Exception:
                     pass
         self._save_history()
-    
+
         self.disconnect()
         if self._history_clean_thread and self._history_clean_thread.is_alive():
             self._history_clean_thread.join(timeout=2)
