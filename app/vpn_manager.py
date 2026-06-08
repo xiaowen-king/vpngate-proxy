@@ -52,7 +52,8 @@ class VpnManager:
         self.history_file = "/data/connection_history.json"
         self.connection_history = self._load_history()
         self._history_clean_thread = None
-        self._reconnect_fail_count = 0          # 连续自动重连失败计数
+        self._reconnect_fail_count = 0
+        self.reconnect_interval = self.config.get("reconnect_interval", 30)
 
     def set_log_callback(self, cb):
         self._log_callback = cb
@@ -531,11 +532,10 @@ class VpnManager:
             time.sleep(self.health_check_interval)
             if not self.status["connected"]:
                 self.health_fail_count = 0
-                # 未连接时自动重连，每30秒尝试一次
                 now = time.time()
-                if now - last_reconnect_time > 30:
+                if now - last_reconnect_time > self.reconnect_interval:   # 使用配置的间隔
                     self.log("检测到未连接，尝试自动重连...")
-                    success, msg = self.auto_connect_next()      # 统一走优先节点优先逻辑
+                    success, msg = self.auto_connect_next()
                     if success:
                         self.log(f"自动重连成功: {msg}")
                         self._reconnect_fail_count = 0
@@ -549,7 +549,6 @@ class VpnManager:
                     last_reconnect_time = now
                 continue
 
-            # 已连接时的健康检查逻辑
             if self._is_tunnel_alive():
                 self.health_fail_count = 0
                 self._reconnect_fail_count = 0
@@ -559,7 +558,7 @@ class VpnManager:
 
             if self.health_fail_count >= self.max_health_fails:
                 self.log(f"连续 {self.health_fail_count} 次健康检测失败，准备切换节点")
-                self._switch_to_next_available()      # 内部也改为调用 auto_connect_next
+                self._switch_to_next_available()
                 self.health_fail_count = 0
 
     def background_check_nodes(self):
