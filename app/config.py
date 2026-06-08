@@ -28,7 +28,8 @@ DEFAULT_CONFIG = {
     "health_check_timeout": 8,
     "preferred_nodes": [],
     "connection_history_retention_days": 30,
-    "socks_max_connections": 200
+    "socks_max_connections": 200,
+    "reconnect_interval": 30
 }
 
 def load_config():
