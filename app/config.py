@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import tempfile
 
 CONFIG_PATH = "/data/config.json"
 
@@ -32,6 +33,10 @@ DEFAULT_CONFIG = {
     "reconnect_interval": 30
 }
 
+# 不应通过 API 返回给前端的敏感字段
+SENSITIVE_KEYS = {"web_password", "vpn_pass", "secret_key"}
+
+
 def load_config():
     if not os.path.exists(CONFIG_PATH):
         cfg = DEFAULT_CONFIG.copy()
@@ -47,6 +52,32 @@ def load_config():
         save_config(cfg)
     return cfg
 
+
 def save_config(cfg):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    """原子写入：先写临时文件再 rename，防止写入中途崩溃导致配置损坏"""
+    dir_name = os.path.dirname(CONFIG_PATH) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, CONFIG_PATH)  # 原子替换
+    except Exception:
+        # 清理临时文件
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def get_safe_config(cfg=None):
+    """返回脱敏后的配置（隐藏密码和密钥）"""
+    if cfg is None:
+        cfg = load_config()
+    safe = {}
+    for k, v in cfg.items():
+        if k in SENSITIVE_KEYS:
+            safe[k] = "******" if v else ""
+        else:
+            safe[k] = v
+    return safe
