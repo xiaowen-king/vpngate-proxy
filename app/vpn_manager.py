@@ -268,17 +268,17 @@ class VpnManager:
         config_b64 = self._get_node_config(node)
         if not config_b64:
             self.log("未找到节点 OpenVPN 配置，无法连接")
-            self._add_failed_ip(node["ip"])
+            self._add_failed_ip(ip)
             return False
 
         # 缓存配置供后续重连使用
-        self._cache_node_config({"ip": node["ip"], "openvpn_config_base64": config_b64})
+        self._cache_node_config({"ip": ip, "openvpn_config_base64": config_b64})
 
         try:
             ovpn_content = base64.b64decode(config_b64).decode("utf-8")
         except Exception:
             self.log("解码 OpenVPN 配置失败")
-            self._add_failed_ip(node["ip"])
+            self._add_failed_ip(ip)
             return False
 
         auth_path = "/tmp/vpn_auth.txt"
@@ -303,7 +303,7 @@ class VpnManager:
             )
         except Exception as e:
             self.log(f"启动 OpenVPN 失败: {str(e)}")
-            self._add_failed_ip(node["ip"])
+            self._add_failed_ip(ip)
             return False
 
         tun_ip = None
@@ -316,7 +316,7 @@ class VpnManager:
         while time.time() - start_time < timeout:
             if self.vpn_process.poll() is not None:
                 self.log("OpenVPN 进程已退出，连接失败")
-                self._add_failed_ip(node["ip"])
+                self._add_failed_ip(ip)
                 self._cleanup_vpn_process()
                 return False
 
@@ -349,18 +349,18 @@ class VpnManager:
 
         if connected_flag or tun_ip:
             self.log("正在从系统获取 VPN 接口信息...")
-            ip, dev = self._get_tun_info()
-            if ip:
-                tun_ip = ip
-                tun_dev = dev
+            sys_ip, sys_dev = self._get_tun_info()
+            if sys_ip:
+                tun_ip = sys_ip
+                tun_dev = sys_dev
             else:
                 self.log("无法从系统获取 VPN IP")
-                self._add_failed_ip(node["ip"])
+                self._add_failed_ip(ip)
                 self.disconnect()
                 return False
         else:
             self.log("获取 VPN IP 失败，无法启动 SOCKS5 代理")
-            self._add_failed_ip(node["ip"])
+            self._add_failed_ip(ip)
             self.disconnect()
             return False
 
@@ -382,7 +382,7 @@ class VpnManager:
         self.status["connected"] = True
         self.status["node_info"] = node
         self.status["socks"] = f"socks5://{self._get_host_ip()}:{socks_port}"
-        self.status["ip_info"] = self.detect_ip(node["ip"])
+        self.status["ip_info"] = self.detect_ip(ip)
         self.log(f"SOCKS5 代理已启动: {self.status['socks']}")
 
         self.status["connected_since"] = datetime.now(timezone.utc).isoformat()
@@ -519,7 +519,7 @@ class VpnManager:
             end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._state_lock:
             for rec in self.connection_history:
-                if rec["ip"] == node_ip and rec["end_time"] is None:
+                if rec.get("ip") == node_ip and rec.get("end_time") is None:
                     rec["end_time"] = end_time
                     try:
                         start = datetime.strptime(rec["start_time"], "%Y-%m-%d %H:%M:%S")
@@ -698,7 +698,7 @@ class VpnManager:
             for node in nodes[:check_limit]:
                 if self._stop_event.is_set():
                     return
-                if self.status["connected"] and node["ip"] == self.status["node_info"].get("ip"):
+                if self.status["connected"] and node.get("ip") == self.status["node_info"].get("ip"):
                     continue
                 if self.test_node(node):
                     available.append(node)
@@ -742,8 +742,8 @@ class VpnManager:
         """
         # 获取当前连接（或最后尝试）的IP
         last_ip = None
-        if self.current_node and self.current_node.get("ip"):
-            last_ip = self.current_node["ip"]
+        if self.current_node:
+            last_ip = self.current_node.get("ip")
         elif self.status["node_info"].get("ip"):
             last_ip = self.status["node_info"]["ip"]
 
@@ -755,7 +755,7 @@ class VpnManager:
             start_idx = 0
             if last_ip:
                 for i, node in enumerate(self.preferred_nodes):
-                    if node["ip"] == last_ip:
+                    if node.get("ip") == last_ip:
                         start_idx = i + 1
                         break
 
@@ -768,15 +768,17 @@ class VpnManager:
                     return False, "达到最大尝试次数"
                 idx = (start_idx + i) % len(self.preferred_nodes)
                 node = self.preferred_nodes[idx]
-                if node["ip"] == last_ip:
+                node_ip = node.get("ip", "")
+                node_hostname = node.get("hostname", "未知")
+                if node_ip == last_ip:
                     continue
-                if node["ip"] in self._failed_ips:
+                if node_ip in self._failed_ips:
                     continue
                 attempt_count += 1
-                self.log(f"尝试优先节点: {node['hostname']} ({node['ip']})")
-                self._add_failed_ip(node["ip"])
+                self.log(f"尝试优先节点: {node_hostname} ({node_ip})")
+                self._add_failed_ip(node_ip)
                 if self.connect_node(node):
-                    return True, node["hostname"]
+                    return True, node_hostname
 
             # 如果第一轮全部因为黑名单或失败而跳过，尝试临时清空黑名单再试一次
             self.log("优先节点全部跳过或失败，临时清空黑名单再尝试一次...")
@@ -788,12 +790,14 @@ class VpnManager:
                     break
                 idx = (start_idx + i) % len(self.preferred_nodes)
                 node = self.preferred_nodes[idx]
-                if node["ip"] == last_ip:
+                node_ip = node.get("ip", "")
+                node_hostname = node.get("hostname", "未知")
+                if node_ip == last_ip:
                     continue
                 attempt_count += 1
-                self.log(f"再次尝试优先节点: {node['hostname']} ({node['ip']})")
+                self.log(f"再次尝试优先节点: {node_hostname} ({node_ip})")
                 if self.connect_node(node):
-                    return True, node["hostname"]
+                    return True, node_hostname
 
             self.log("所有优先节点均连接失败，降级到普通节点列表...")
 
@@ -808,7 +812,7 @@ class VpnManager:
         start_index = 0
         if last_ip:
             for i, node in enumerate(nodes):
-                if node["ip"] == last_ip:
+                if node.get("ip") == last_ip:
                     start_index = i + 1
                     break
 
@@ -820,9 +824,9 @@ class VpnManager:
         for i in range(len(nodes)):
             idx = (start_index + i) % len(nodes)
             node = nodes[idx]
-            if node["ip"] == last_ip:
+            if node.get("ip") == last_ip:
                 continue
-            if node["ip"] in self._failed_ips:
+            if node.get("ip") in self._failed_ips:
                 continue
             candidates.append(node)
 
@@ -836,7 +840,7 @@ class VpnManager:
             other_nodes = []
             last_sub = self._get_subnet(last_ip, subnet_prefix)
             for node in candidates:
-                node_sub = self._get_subnet(node["ip"], subnet_prefix)
+                node_sub = self._get_subnet(node.get("ip", ""), subnet_prefix)
                 if node_sub and last_sub and node_sub == last_sub:
                     subnet_nodes.append(node)
                 else:
@@ -850,11 +854,13 @@ class VpnManager:
                 self.log(f"已达到最大尝试次数 ({MAX_CONNECT_ATTEMPTS})，停止尝试")
                 return False, "达到最大尝试次数"
             attempt_count += 1
-            self._add_failed_ip(node["ip"])
-            self.log(f"自动连接尝试节点: {node['hostname']} ({node['ip']})")
+            node_ip = node.get("ip", "")
+            node_hostname = node.get("hostname", "未知")
+            self._add_failed_ip(node_ip)
+            self.log(f"自动连接尝试节点: {node_hostname} ({node_ip})")
             if self.connect_node(node):
-                return True, node["hostname"]
-            self.log(f"节点 {node['hostname']} 连接失败")
+                return True, node_hostname
+            self.log(f"节点 {node_hostname} 连接失败")
 
         self.log("自动连接失败：所有候选节点均连接失败")
         return False, "所有候选节点均连接失败"
