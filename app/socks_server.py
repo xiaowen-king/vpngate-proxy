@@ -103,7 +103,14 @@ class Socks5Server:
 
     def _handle_client(self, client_sock):
         remote = None
+        target_addr = "unknown"
+        target_port = 0
         try:
+            # 设置客户端 socket 选项：禁用 Nagle 算法，减少握手响应延迟
+            client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # 设置客户端 socket 超时，防止无限阻塞
+            client_sock.settimeout(30)
+
             # ---- 握手阶段 ----
             header = self._recv_exact(client_sock, 2)
             if not header or header[0] != 0x05:
@@ -154,6 +161,8 @@ class Socks5Server:
             # ---- 建立到目标服务器的连接 ----
             remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             remote.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # 设置连接超时，防止 VPN 隧道未就绪时无限阻塞
+            remote.settimeout(15)
             remote.bind((self.outbound_ip, 0))
             remote.connect((target_addr, target_port))
             logger.debug(f"Proxying to {target_addr}:{target_port} via {self.outbound_ip}")
@@ -165,8 +174,16 @@ class Socks5Server:
                     struct.pack("!H", bind_addr[1])
             client_sock.sendall(reply)
 
+            # 连接建立后，恢复正常超时（避免长连接被过早断开）
+            remote.settimeout(None)
+            client_sock.settimeout(None)
+
             # ---- 双向转发 ----
             self._relay(client_sock, remote)
+        except socket.timeout:
+            logger.debug(f"SOCKS5 connection timeout to {target_addr}:{target_port}")
+        except ConnectionResetError:
+            logger.debug(f"SOCKS5 connection reset by peer")
         except Exception as e:
             logger.error(f"SOCKS5 handling error: {e}")
         finally:
