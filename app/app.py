@@ -429,7 +429,9 @@ def handle_preferred_nodes():
     return jsonify({"success": False, "error": "无效操作"})
 
 def graceful_shutdown(signum, frame):
-    threading.Thread(target=manager.stop, daemon=True).start()
+    # 使用 eventlet.spawn 而非 threading.Thread，避免 eventlet 信号处理中的 MAINLOOP 冲突
+    import eventlet
+    eventlet.spawn(manager.stop)
 
 signal.signal(signal.SIGTERM, graceful_shutdown)
 signal.signal(signal.SIGINT, graceful_shutdown)
