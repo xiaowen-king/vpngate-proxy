@@ -115,16 +115,16 @@ def nodes():
 @app.route("/api/connect", methods=["POST"])
 @login_required
 def connect():
-    data = request.json
+    data = request.json or {}
     ip = data.get("ip")
     # 先在当前节点列表中查找
     for node in manager.nodes:
-        if node["ip"] == ip:
+        if node.get("ip") == ip:
             success = manager.connect_node(node)
             return jsonify({"success": success})
     # 如果当前列表中没有，尝试从优先节点中获取（已保存完整配置）
     for node in manager.preferred_nodes:
-        if node["ip"] == ip:
+        if node.get("ip") == ip:
             success = manager.connect_node(node)
             return jsonify({"success": success})
     return jsonify({"success": False, "error": "节点未找到"})
@@ -142,7 +142,7 @@ def handle_config():
         # 返回脱敏配置，不暴露密码和密钥
         return jsonify(get_safe_config())
     else:
-        new_cfg = request.json
+        new_cfg = request.json or {}
         # 合并：前端未传的敏感字段保留原值（前端显示的是 ******）
         current = load_config()
         for sensitive_key in ("web_password", "vpn_pass", "secret_key"):
@@ -211,6 +211,71 @@ def system_info():
     except Exception:
         info["镜像SHA"] = "未知"
     return jsonify(info)
+
+@app.route("/api/latency")
+@login_required
+def latency():
+    ms = manager.measure_latency()
+    return jsonify({"latency_ms": ms if ms > 0 else None})
+
+
+@app.route("/api/nodes_latency", methods=["POST"])
+@login_required
+def nodes_latency():
+    data = request.get_json() or {}
+    ips = data.get("ips", [])
+    if not isinstance(ips, list) or len(ips) == 0:
+        return jsonify({"error": "需要提供 IP 列表"}), 400
+    # 安全上限，避免恶意请求
+    ips = ips[:500]
+    latencies = manager.measure_nodes_latency(ips)
+    return jsonify({"latencies": latencies})
+
+
+@app.route("/api/speedtest")
+@login_required
+def speedtest():
+    target = manager.config.get("speedtest_url", "http://cachefly.cachefly.net/1mb.test")
+    socks_port = manager.config.get("socks_port", 1080)
+    max_retries = int(manager.config.get("speedtest_retry", 3))
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            start = time.time()
+            result = subprocess.run(
+                ["curl", "-s", "--socks5", f"127.0.0.1:{socks_port}",
+                 "--max-time", "60", "-o", "/dev/null", "-w", "%{size_download}", target],
+                capture_output=True, text=True, timeout=70
+            )
+            elapsed = time.time() - start
+
+            if result.returncode == 0:
+                size_bytes = int(result.stdout.strip())
+                speed_mbps = round((size_bytes * 8) / (elapsed * 1_000_000), 2)
+                return jsonify({
+                    "speed_mbps": speed_mbps,
+                    "elapsed_sec": round(elapsed, 2),
+                    "size_bytes": size_bytes
+                })
+
+            # 失败则记录日志，继续重试
+            error_msg = result.stderr.strip() or f"curl 退出码: {result.returncode}"
+            manager.log(f"测速失败 (第{attempt}次，共{max_retries}次): {error_msg}")
+
+        except Exception as e:
+            error_msg = str(e)
+            manager.log(f"测速异常 (第{attempt}次，共{max_retries}次): {error_msg}")
+
+        # 如果不是最后一次，等待 5 秒再重试
+        if attempt < max_retries:
+            time.sleep(5)
+
+    # 所有重试均失败
+    return jsonify({
+        "speed_mbps": None,
+        "error": f"经过 {max_retries} 次尝试仍失败"
+    })
+
 
 @app.route("/api/logs")
 @login_required
@@ -323,17 +388,17 @@ def delete_connection_history(record_id):
 def handle_preferred_nodes():
     if request.method == "GET":
         # 仅返回 IP 列表供前端显示
-        ips = [node["ip"] for node in manager.preferred_nodes]
+        ips = [node.get("ip", "") for node in manager.preferred_nodes]
         return jsonify({"preferred_ips": ips})
 
-    data = request.json
+    data = request.json or {}
     ip = data.get("ip")
     action = data.get("action")  # "add" 或 "remove"
     if action == "add":
         target_node = None
         # 先从当前节点列表中查找
         for n in manager.nodes:
-            if n["ip"] == ip:
+            if n.get("ip") == ip:
                 target_node = n
                 break
         # 如果列表中没有，但当前连接的节点IP匹配，则使用当前连接信息
@@ -345,7 +410,7 @@ def handle_preferred_nodes():
             return jsonify({"success": False, "error": "该节点不在当前节点列表中，且不是当前连接节点，无法设置优先连接"})
         if len(manager.preferred_nodes) >= 3:
             return jsonify({"success": False, "error": "最多只能设置3个优先节点"})
-        if any(n["ip"] == ip for n in manager.preferred_nodes):
+        if any(n.get("ip") == ip for n in manager.preferred_nodes):
             return jsonify({"success": True})  # 已存在
         # 确保优先节点保存完整配置（含 base64），供后续重连使用
         config_b64 = target_node.get("openvpn_config_base64") or manager._node_config_cache.get(ip, "")
@@ -357,7 +422,7 @@ def handle_preferred_nodes():
         save_config(manager.config)
         return jsonify({"success": True})
     elif action == "remove":
-        manager.preferred_nodes = [n for n in manager.preferred_nodes if n["ip"] != ip]
+        manager.preferred_nodes = [n for n in manager.preferred_nodes if n.get("ip") != ip]
         manager.config["preferred_nodes"] = manager.preferred_nodes
         save_config(manager.config)
         return jsonify({"success": True})
