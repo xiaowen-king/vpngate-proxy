@@ -597,9 +597,12 @@ class VpnManager:
             self._failed_ips.add(ip)  # 保留当前这个
 
     def _is_tunnel_alive(self):
+        # ---- 第一层：检查 OpenVPN 进程 ----
         if not self.vpn_process or self.vpn_process.poll() is not None:
             self.log("健康检测失败: OpenVPN 进程未运行")
             return False
+
+        # ---- 第二层：检查 tun 接口和 IP（快速失败，避免无意义的 HTTP 检测） ----
         if not self.tun_dev or not self.tun_ip:
             self.log("健康检测失败: tun 接口未分配 IP")
             return False
@@ -608,13 +611,17 @@ class VpnManager:
                 ["ip", "addr", "show", "dev", self.tun_dev],
                 capture_output=True, text=True, timeout=5
             )
-            if ip_check.returncode != 0 or self.tun_ip not in ip_check.stdout:
-                self.log("健康检测失败: tun 接口状态异常")
+            if ip_check.returncode != 0:
+                self.log(f"健康检测失败: tun 接口 {self.tun_dev} 不存在 (可能 VPN 隧道已断开)")
+                return False
+            if self.tun_ip not in ip_check.stdout:
+                self.log(f"健康检测失败: tun 接口 {self.tun_dev} 上的 IP {self.tun_ip} 已丢失 (VPN 隧道断开)")
                 return False
         except Exception as e:
             self.log(f"健康检测失败: 检查 tun 接口异常 - {e}")
             return False
 
+        # ---- 第三层：通过 SOCKS5 代理访问检测 URL ----
         raw_urls = self.config.get("health_check_urls", "")
         if raw_urls.strip():
             urls = [u.strip() for u in re.split(r'[,\n]', raw_urls) if u.strip()]
@@ -635,14 +642,27 @@ class VpnManager:
             try:
                 result = subprocess.run(
                     ["curl", "-s", "--socks5", f"127.0.0.1:{socks_port}",
-                     "--max-time", str(timeout), url],
+                     "--max-time", str(timeout), "-w", "\n%{http_code}", url],
                     capture_output=True, text=True, timeout=timeout + 3
                 )
-                if result.returncode == 0 and result.stdout.strip():
-                    self.log(f"健康检测成功: {url} 访问正常")
-                    return True
+                output = result.stdout.strip()
+                if result.returncode == 0 and output:
+                    # 分离 HTTP 状态码和响应体
+                    lines = output.rsplit('\n', 1)
+                    body = lines[0] if len(lines) > 1 else output
+                    http_code = lines[-1] if len(lines) > 1 else ""
+                    if body.strip():
+                        self.log(f"健康检测成功: {url} 访问正常 (HTTP {http_code})")
+                        return True
+                    else:
+                        self.log(f"健康检测尝试 {url} 失败: 连接成功但无响应数据 (HTTP {http_code})")
+                elif result.returncode == 7:
+                    # curl exit code 7 = couldn't connect to host
+                    self.log(f"健康检测尝试 {url} 失败: SOCKS5 代理连接失败 (隧道可能断开)")
                 else:
-                    self.log(f"健康检测尝试 {url} 失败: {result.stderr.strip() or '无返回数据'}")
+                    self.log(f"健康检测尝试 {url} 失败: {result.stderr.strip() or f'curl 退出码 {result.returncode}'}")
+            except subprocess.TimeoutExpired:
+                self.log(f"健康检测尝试 {url} 超时 ({timeout}秒)")
             except Exception as e:
                 self.log(f"健康检测尝试 {url} 异常: {e}")
 
