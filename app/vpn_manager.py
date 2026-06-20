@@ -379,6 +379,10 @@ class VpnManager:
         self.socks_server = Socks5Server(socks_bind, socks_port, tun_ip, max_connections=max_conn)
         self.socks_server.start()
 
+        # 隧道预热：通过 SOCKS5 发一个测试请求，激活 VPN 隧道的 TLS 会话和路由
+        # 防止浏览器第一个 HTTPS 请求因隧道未完全就绪而失败（ERR_CONNECTION_CLOSED）
+        self._warmup_tunnel(socks_port)
+
         self.status["connected"] = True
         self.status["node_info"] = node
         self.status["socks"] = f"socks5://{self._get_host_ip()}:{socks_port}"
@@ -452,6 +456,26 @@ class VpnManager:
         self.status["node_info"] = {}
         self.status["socks"] = ""
         self.policy_routing_set = False
+
+    def _warmup_tunnel(self, socks_port):
+        """隧道预热：通过 SOCKS5 发一个轻量请求，激活 VPN 隧道的 TLS 会话和路由缓存。
+        防止浏览器第一个 HTTPS 请求因隧道未完全就绪而失败。"""
+        try:
+            self.log("正在预热 VPN 隧道...")
+            result = subprocess.run(
+                ["curl", "-s", "--socks5", f"127.0.0.1:{socks_port}",
+                 "--max-time", "10", "--connect-timeout", "5",
+                 "-o", "/dev/null", "-w", "%{http_code}",
+                 "http://httpbin.org/ip"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                self.log(f"隧道预热成功 (HTTP {result.stdout.strip()})")
+            else:
+                # 预热失败不影响连接状态，只是警告
+                self.log(f"隧道预热未成功: {result.stderr.strip() or '无响应'}")
+        except Exception as e:
+            self.log(f"隧道预热异常（不影响连接）: {e}")
 
     def _get_host_ip(self):
         s = None
