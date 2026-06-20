@@ -12,6 +12,7 @@
         .status-card { margin-bottom: 15px; }
         .modal-log-area { height: 200px; overflow-y: auto; background: #1e1e1e; color: #0f0; font-family: monospace; padding: 10px; font-size: 0.85rem; }
         #history-table.loading {pointer-events: none;opacity: 0.6;}
+        .pagination-info { font-size: 0.9rem; color: #666; }
     </style>
 </head>
 <body>
@@ -118,14 +119,22 @@
                     </thead>
                     <tbody id="history-table"></tbody>
                 </table>
+                <div id="history-pagination" class="d-flex align-items-center justify-content-between mt-2">
+                    <div class="pagination-info" id="history-page-info"></div>
+                    <div>
+                        <button id="history-prev-btn" class="btn btn-sm btn-outline-primary" disabled>上一页</button>
+                        <span id="history-page-num" class="mx-2">1</span>
+                        <button id="history-next-btn" class="btn btn-sm btn-outline-primary" disabled>下一页</button>
+                    </div>
+                </div>
             </div>
             <!-- 设置 -->
             <div class="tab-pane fade" id="settings">
                 <form id="settings-form">
                     <div class="mb-3">
                         <label>面板密码</label>
-                        <input type="password" class="form-control" id="cfg-password">
-                        <small class="text-muted">面板登录密码，保存立即生效</small>
+                        <input type="password" class="form-control" id="cfg-password" placeholder="留空则不修改">
+                        <small class="text-muted">面板登录密码，保存立即生效（显示******表示已设置）</small>
                     </div>
                     <div class="mb-3">
                         <label>API 地址</label>
@@ -154,8 +163,8 @@
                     </div>
                     <div class="mb-3">
                         <label>VPN 密码</label>
-                        <input type="password" class="form-control" id="cfg-vpn-pass">
-                        <small class="text-muted">连接节点的密码，保存立即生效</small>
+                        <input type="password" class="form-control" id="cfg-vpn-pass" placeholder="留空则不修改">
+                        <small class="text-muted">连接节点的密码，保存立即生效（显示******表示已设置）</small>
                     </div>
                     <div class="mb-3">
                         <label>默认连接地区</label>
@@ -176,7 +185,7 @@
                     <div class="mb-3">
                         <label>子网前缀长度</label>
                         <input type="number" class="form-control" id="cfg-subnet-prefix-length" min="8" max="32" value="24">
-                        <small class="text-muted">/24 表示前三段相同，/16 表示前两段相同，直接填写数字，无需加“/”保存立即生效</small>
+                        <small class="text-muted">/24 表示前三段相同，/16 表示前两段相同，直接填写数字，无需加"/"保存立即生效</small>
                     </div>
                     <div class="mb-3">
                         <label>节点数据上限</label>
@@ -305,6 +314,21 @@
         let connectedSince = null;
         let localTimer = null;
 
+        // ========== 日志面板限制：防止 DOM 无限增长导致浏览器崩溃 ==========
+        const MAX_LOG_LINES = 2000;
+
+        function appendLogLine(panel, text, color) {
+            const div = document.createElement("div");
+            if (color) div.style.color = color;
+            div.textContent = text;  // 使用 textContent 防止 XSS
+            panel.appendChild(div);
+            // 超过上限时移除旧的 DOM 元素
+            while (panel.children.length > MAX_LOG_LINES) {
+                panel.removeChild(panel.firstChild);
+            }
+        }
+        // ====================================================================
+
         function showMessage(title, message, type = "info") {
             document.getElementById("globalModalTitle").textContent = title;
             document.getElementById("globalModalBody").textContent = message;
@@ -326,39 +350,34 @@
 
         function isLogPanelAtBottom() {
             const panel = document.getElementById("log-panel");
-            // 如果滚动位置距离底部小于 30px，认为在底部
             return panel.scrollHeight - panel.clientHeight - panel.scrollTop < 30;
         }
 
-        // ========== 新增：加载历史日志 ==========
+        // ========== 加载历史日志 ==========
         async function loadHistoricalLogs() {
             try {
                 const res = await fetch("/api/logs");
                 if (!res.ok) return;
                 const logs = await res.json();
-                // 清空当前面板，填充历史日志
                 logPanel.innerHTML = "";
                 logs.forEach(line => {
-                    logPanel.innerHTML += `<div>${line}</div>`;
+                    appendLogLine(logPanel, line);
                 });
                 logPanel.scrollTop = logPanel.scrollHeight;
             } catch(e) {
                 console.error("加载历史日志失败:", e);
             }
         }
-        // =========================================
 
         socket.on("log", (data) => {
-            const msg = `<div>${data.message}</div>`;
-            const atBottom = isLogPanelAtBottom();  // 记录是否在底部
-            logPanel.innerHTML += msg;
-            // 只有之前位于底部时才自动滚动到最新
+            const atBottom = isLogPanelAtBottom();
+            appendLogLine(logPanel, data.message);
             if (atBottom) {
                 logPanel.scrollTop = logPanel.scrollHeight;
             }
             if (modalVisible) {
-                modalLogPanel.innerHTML += msg;
-                modalLogPanel.scrollTop = modalLogPanel.scrollHeight; // 模态框总是滚动
+                appendLogLine(modalLogPanel, data.message);
+                modalLogPanel.scrollTop = modalLogPanel.scrollHeight;
             }
         });
 
@@ -373,7 +392,6 @@
                 const socksLink = data.socks || "-";
                 document.getElementById("socks-link").textContent = socksLink;
                 const newConnectedSince = data.connected_since || null;
-                // 如果开始时间发生变化（断开或重连），重启本地计时器
                 if (newConnectedSince !== connectedSince) {
                     connectedSince = newConnectedSince;
                     if (connectedSince) {
@@ -387,7 +405,16 @@
                 copyBtn.disabled = !(data.connected && socksLink !== "-");
                 const ipInfo = document.getElementById("ip-info");
                 if (data.ip_info && Object.keys(data.ip_info).length > 0) {
-                    ipInfo.innerHTML = Object.entries(data.ip_info).map(([k,v]) => `<p><strong>${k}:</strong> ${v}</p>`).join("");
+                    // 安全渲染 IP 信息：使用 textContent 防止 XSS
+                    ipInfo.innerHTML = "";
+                    Object.entries(data.ip_info).forEach(([k,v]) => {
+                        const p = document.createElement("p");
+                        const strong = document.createElement("strong");
+                        strong.textContent = k + ":";
+                        p.appendChild(strong);
+                        p.appendChild(document.createTextNode(" " + v));
+                        ipInfo.appendChild(p);
+                    });
                 } else {
                     ipInfo.textContent = "暂无";
                 }
@@ -486,18 +513,26 @@
             updateCurrentRegionText();
         }
 
+        // 安全转义 HTML，防止 XSS
+        function escapeHtml(str) {
+            if (!str) return "";
+            const div = document.createElement("div");
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
         function renderNodeTable(nodes) {
             const tbody = document.getElementById("node-table");
             let html = "";
             nodes.forEach((n, idx) => {
-                html += `<tr id="node-row-${n.ip}">
+                html += `<tr id="node-row-${escapeHtml(n.ip)}">
                     <td>${idx+1}</td>
-                    <td>${n.country_long} (${n.country_short})</td>
-                    <td>${n.ip}</td>
-                    <td>${n.speed} bps</td>
-                    <td>${n.num_sessions}</td>
-                    <td class="latency-cell" data-ip="${n.ip}">-</td>
-                    <td><button class="btn btn-sm btn-primary connect-btn" data-ip="${n.ip}" ${isConnecting ? 'disabled' : ''}>连接</button></td>
+                    <td>${escapeHtml(n.country_long)} (${escapeHtml(n.country_short)})</td>
+                    <td>${escapeHtml(n.ip)}</td>
+                    <td>${escapeHtml(n.speed)} bps</td>
+                    <td>${escapeHtml(n.num_sessions)}</td>
+                    <td class="latency-cell" data-ip="${escapeHtml(n.ip)}">-</td>
+                    <td><button class="btn btn-sm btn-primary connect-btn" data-ip="${escapeHtml(n.ip)}" ${isConnecting ? 'disabled' : ''}>连接</button></td>
                 </tr>`;
             });
             tbody.innerHTML = html || "<tr><td colspan='7'>无节点数据</td></tr>";
@@ -548,7 +583,6 @@
             fetchIntervalTimer = setInterval(async () => {
                 console.log("自动刷新全量节点缓存...");
                 await updateAllNodesCache();
-                // 如果节点列表页可见，也静默更新表格
                 const nodesTab = document.getElementById("nodes");
                 if (nodesTab.classList.contains("active")) {
                     try {
@@ -617,15 +651,13 @@
                 connectModal.show();
             } else {
                 const tip = `>>> 连接失败，自动尝试下一个节点 (${ip}) ...`;
-                logPanel.innerHTML += `<div style="color: #ff0;">${tip}</div>`;
-                logPanel.scrollTop = logPanel.scrollHeight;
+                appendLogLine(logPanel, tip, "#ff0");
                 if (modalVisible) {
-                    modalLogPanel.innerHTML += `<div style="color: #ff0;">${tip}</div>`;
-                    modalLogPanel.scrollTop = modalLogPanel.scrollHeight;
+                    appendLogLine(modalLogPanel, tip, "#ff0");
                 }
                 document.getElementById("modal-status-text").textContent = `正在连接 ${ip} (第${depth+1}次尝试)...`;
-                modalLogPanel.innerHTML = `<div style="color: #ff0;">${tip}</div>`;
-                modalLogPanel.scrollTop = modalLogPanel.scrollHeight;
+                modalLogPanel.innerHTML = "";
+                appendLogLine(modalLogPanel, tip, "#ff0");
             }
 
             try {
@@ -655,9 +687,7 @@
                         return;
                     }
                 }
-                // 所有重试已用完
                 document.getElementById("modal-status-text").textContent += " 所有尝试均失败。";
-                // 自动尝试使用默认地区连接一次
                 document.getElementById("modal-status-text").textContent += " 正在尝试使用默认连接地区自动连接...";
                 try {
                     const autoRes = await fetch("/api/auto_connect", { method: "POST" });
@@ -735,35 +765,11 @@
             });
         });
 
-        // 保存并重启按钮（含 auto_update_interval）
+        // 保存并重启按钮
         document.getElementById("restart-btn").addEventListener("click", () => {
             showConfirm("保存并重启服务", "将保存当前设置并重启服务，确定继续？", async (confirmed) => {
                 if (!confirmed) return;
-                const newCfg = {
-                    web_password: document.getElementById("cfg-password").value,
-                    api_url: document.getElementById("cfg-api-url").value,
-                    socks_port: parseInt(document.getElementById("cfg-socks-port").value),
-                    web_port: parseInt(document.getElementById("cfg-web-port").value),
-                    vpn_user: document.getElementById("cfg-vpn-user").value,
-                    vpn_pass: document.getElementById("cfg-vpn-pass").value,
-                    region: document.getElementById("cfg-region").value,
-                    node_limit: parseInt(document.getElementById("cfg-node-limit").value),
-                    check_limit: parseInt(document.getElementById("cfg-check-limit").value),
-                    auto_update_interval: parseInt(document.getElementById("cfg-auto-update-interval").value) || 0,
-                    health_fail_threshold: parseInt(document.getElementById("cfg-health-fail-threshold").value) || 3,
-                    health_check_interval: parseInt(document.getElementById("cfg-health-check-interval").value) || 10,
-                    log_retention_days: parseInt(document.getElementById("cfg-log-retention-days").value) || 3,
-                    health_check_urls: document.getElementById("cfg-health-check-urls").value,
-                    latency_check_target: document.getElementById("cfg-latency-check-target").value,
-                    speedtest_url: document.getElementById("cfg-speedtest-url").value,
-                    speedtest_retry: parseInt(document.getElementById("cfg-speedtest-retry").value) || 3,
-                    prefer_same_subnet: document.getElementById("cfg-prefer-same-subnet").value === "true",
-                    subnet_prefix_length: parseInt(document.getElementById("cfg-subnet-prefix-length").value) || 24,
-                    health_check_timeout: parseInt(document.getElementById("cfg-health-check-timeout").value) || 8,
-                    connection_history_retention_days: parseInt(document.getElementById("cfg-history-retention-days").value) || 30,
-                    socks_max_connections: parseInt(document.getElementById("cfg-socks-max-connections").value) || 200,
-                    reconnect_interval: parseInt(document.getElementById("cfg-reconnect-interval").value) || 30,
-                };
+                const newCfg = buildConfigFromForm();
                 try {
                     const saveRes = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newCfg) });
                     const saveData = await saveRes.json();
@@ -776,16 +782,48 @@
             });
         });
 
+        // 从表单构建配置对象（敏感字段留空表示不修改）
+        function buildConfigFromForm() {
+            const pwd = document.getElementById("cfg-password").value;
+            const vpnPass = document.getElementById("cfg-vpn-pass").value;
+            return {
+                web_password: pwd || "******",  // 留空时发送 ******，后端会保留原值
+                api_url: document.getElementById("cfg-api-url").value,
+                socks_port: parseInt(document.getElementById("cfg-socks-port").value),
+                web_port: parseInt(document.getElementById("cfg-web-port").value),
+                vpn_user: document.getElementById("cfg-vpn-user").value,
+                vpn_pass: vpnPass || "******",  // 留空时发送 ******，后端会保留原值
+                region: document.getElementById("cfg-region").value,
+                node_limit: parseInt(document.getElementById("cfg-node-limit").value),
+                check_limit: parseInt(document.getElementById("cfg-check-limit").value),
+                auto_update_interval: parseInt(document.getElementById("cfg-auto-update-interval").value) || 0,
+                health_fail_threshold: parseInt(document.getElementById("cfg-health-fail-threshold").value) || 3,
+                health_check_interval: parseInt(document.getElementById("cfg-health-check-interval").value) || 10,
+                log_retention_days: parseInt(document.getElementById("cfg-log-retention-days").value) || 3,
+                health_check_urls: document.getElementById("cfg-health-check-urls").value,
+                latency_check_target: document.getElementById("cfg-latency-check-target").value,
+                speedtest_url: document.getElementById("cfg-speedtest-url").value,
+                speedtest_retry: parseInt(document.getElementById("cfg-speedtest-retry").value) || 3,
+                prefer_same_subnet: document.getElementById("cfg-prefer-same-subnet").value === "true",
+                subnet_prefix_length: parseInt(document.getElementById("cfg-subnet-prefix-length").value) || 24,
+                health_check_timeout: parseInt(document.getElementById("cfg-health-check-timeout").value) || 8,
+                connection_history_retention_days: parseInt(document.getElementById("cfg-history-retention-days").value) || 30,
+                socks_max_connections: parseInt(document.getElementById("cfg-socks-max-connections").value) || 200,
+                reconnect_interval: parseInt(document.getElementById("cfg-reconnect-interval").value) || 30,
+            };
+        }
+
         async function loadSettings() {
             try {
                 const res = await fetch("/api/config");
                 const cfg = await res.json();
-                document.getElementById("cfg-password").value = cfg.web_password || "";
+                // 密码字段留空（后端返回 ****** 表示已设置，前端不填入输入框）
+                document.getElementById("cfg-password").value = "";
                 document.getElementById("cfg-api-url").value = cfg.api_url || "";
                 document.getElementById("cfg-socks-port").value = cfg.socks_port || 1080;
                 document.getElementById("cfg-web-port").value = cfg.web_port || 8080;
                 document.getElementById("cfg-vpn-user").value = cfg.vpn_user || "";
-                document.getElementById("cfg-vpn-pass").value = cfg.vpn_pass || "";
+                document.getElementById("cfg-vpn-pass").value = "";
                 document.getElementById("cfg-node-limit").value = cfg.node_limit || 200;
                 document.getElementById("cfg-check-limit").value = cfg.check_limit || 20;
                 document.getElementById("cfg-auto-update-interval").value = cfg.auto_update_interval || 0;
@@ -811,31 +849,7 @@
 
         document.getElementById("settings-form").addEventListener("submit", async (e) => {
             e.preventDefault();
-            const newCfg = {
-                web_password: document.getElementById("cfg-password").value,
-                api_url: document.getElementById("cfg-api-url").value,
-                socks_port: parseInt(document.getElementById("cfg-socks-port").value),
-                web_port: parseInt(document.getElementById("cfg-web-port").value),
-                vpn_user: document.getElementById("cfg-vpn-user").value,
-                vpn_pass: document.getElementById("cfg-vpn-pass").value,
-                region: document.getElementById("cfg-region").value,
-                node_limit: parseInt(document.getElementById("cfg-node-limit").value),
-                check_limit: parseInt(document.getElementById("cfg-check-limit").value),
-                auto_update_interval: parseInt(document.getElementById("cfg-auto-update-interval").value) || 0,
-                health_fail_threshold: parseInt(document.getElementById("cfg-health-fail-threshold").value) || 3,
-                health_check_interval: parseInt(document.getElementById("cfg-health-check-interval").value) || 10,
-                log_retention_days: parseInt(document.getElementById("cfg-log-retention-days").value) || 3,
-                health_check_urls: document.getElementById("cfg-health-check-urls").value,
-                latency_check_target: document.getElementById("cfg-latency-check-target").value,
-                speedtest_url: document.getElementById("cfg-speedtest-url").value,
-                speedtest_retry: parseInt(document.getElementById("cfg-speedtest-retry").value) || 3,
-                prefer_same_subnet: document.getElementById("cfg-prefer-same-subnet").value === "true",
-                subnet_prefix_length: parseInt(document.getElementById("cfg-subnet-prefix-length").value) || 24,
-                health_check_timeout: parseInt(document.getElementById("cfg-health-check-timeout").value) || 8,
-                connection_history_retention_days: parseInt(document.getElementById("cfg-history-retention-days").value) || 30,
-                socks_max_connections: parseInt(document.getElementById("cfg-socks-max-connections").value) || 200,
-                reconnect_interval: parseInt(document.getElementById("cfg-reconnect-interval").value) || 30,
-            };
+            const newCfg = buildConfigFromForm();
             const msg = document.getElementById("settings-msg");
             try {
                 const res = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newCfg) });
@@ -864,7 +878,15 @@
                 if (!res.ok) throw new Error("HTTP " + res.status);
                 const data = await res.json();
                 const div = document.getElementById("system-info");
-                div.innerHTML = Object.entries(data).map(([key, val]) => `<p><strong>${key}:</strong> ${val}</p>`).join("");
+                div.innerHTML = "";
+                Object.entries(data).forEach(([key, val]) => {
+                    const p = document.createElement("p");
+                    const strong = document.createElement("strong");
+                    strong.textContent = key + ":";
+                    p.appendChild(strong);
+                    p.appendChild(document.createTextNode(" " + val));
+                    div.appendChild(p);
+                });
             } catch(e) {
                 document.getElementById("system-info").textContent = "加载系统信息失败: " + e.message;
             }
@@ -915,50 +937,49 @@
         });
 
         document.getElementById("test-latency-btn").addEventListener("click", async () => {
-        const btn = document.getElementById("test-latency-btn");
-        btn.disabled = true;
-        btn.textContent = "测试中...";
-        const cells = document.querySelectorAll(".latency-cell");
-        const ips = Array.from(cells).map(cell => cell.getAttribute("data-ip"));
-        if (ips.length === 0) {
-            showMessage("提示", "当前没有节点可测", "warning");
-            btn.disabled = false;
-            btn.textContent = "测试所有节点延迟";
-            return;
-        }
-        try {
-            const res = await fetch("/api/nodes_latency", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ ips })
-            });
-            if (!res.ok) {
-                const errData = await res.json().catch(() => ({}));
-                throw new Error(errData.error || `HTTP ${res.status}`);
+            const btn = document.getElementById("test-latency-btn");
+            btn.disabled = true;
+            btn.textContent = "测试中...";
+            const cells = document.querySelectorAll(".latency-cell");
+            const ips = Array.from(cells).map(cell => cell.getAttribute("data-ip"));
+            if (ips.length === 0) {
+                showMessage("提示", "当前没有节点可测", "warning");
+                btn.disabled = false;
+                btn.textContent = "测试所有节点延迟";
+                return;
             }
-            const data = await res.json();
-            const latencies = data.latencies || {};
-            cells.forEach(cell => {
-                const ip = cell.getAttribute("data-ip");
-                const lat = latencies[ip];
-                if (lat !== undefined && lat !== null && lat >= 0) {
-                    cell.textContent = lat;
-                } else {
-                    cell.textContent = "超时";
+            try {
+                const res = await fetch("/api/nodes_latency", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ ips })
+                });
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    throw new Error(errData.error || `HTTP ${res.status}`);
                 }
-            });
-            showMessage("测试完成", "所有节点延迟已更新", "success");
-        } catch(e) {
-            showMessage("测试失败", e.message, "danger");
-        } finally {
-            btn.disabled = false;
-            btn.textContent = "测试所有节点延迟";
-        }
-    });
+                const data = await res.json();
+                const latencies = data.latencies || {};
+                cells.forEach(cell => {
+                    const ip = cell.getAttribute("data-ip");
+                    const lat = latencies[ip];
+                    if (lat !== undefined && lat !== null && lat >= 0) {
+                        cell.textContent = lat;
+                    } else {
+                        cell.textContent = "超时";
+                    }
+                });
+                showMessage("测试完成", "所有节点延迟已更新", "success");
+            } catch(e) {
+                showMessage("测试失败", e.message, "danger");
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "测试所有节点延迟";
+            }
+        });
 
-        let preferredIps = [];  // 存储优先节点 IP 列表
+        let preferredIps = [];
 
-        // 加载优先节点
         async function loadPreferredIps() {
             try {
                 const res = await fetch("/api/preferred_nodes");
@@ -967,11 +988,18 @@
             } catch(e) { console.error(e); }
         }
 
-        // 渲染连接历史表格
+        // ========== 连接历史分页状态 ==========
+        let historyCurrentPage = 1;
+        let historyCurrentSort = "start_time";
+        let historyCurrentOrder = "desc";
+        let historyTotalPages = 1;
+        let historyPerPage = 50;
+
         function renderHistoryTable(history) {
             const tbody = document.getElementById("history-table");
             let html = "";
             const prefColors = ["btn-warning", "btn-info", "btn-success"];
+            const pageOffset = (historyCurrentPage - 1) * historyPerPage;
             history.forEach((rec, idx) => {
                 const prefIndex = preferredIps.indexOf(rec.ip);
                 let prefBtnClass = "btn-outline-warning";
@@ -982,47 +1010,60 @@
                     prefBtnClass = prefColors[prefIndex];
                     action = "remove";
                     btnText = "取消优先连接";
-                    // 添加连接按钮，仅优先节点显示
-                    connectBtnHtml = `<button class="btn btn-sm btn-primary connect-btn-history" data-ip="${rec.ip}" ${isConnecting ? 'disabled' : ''}>连接</button>`;
+                    connectBtnHtml = `<button class="btn btn-sm btn-primary connect-btn-history" data-ip="${escapeHtml(rec.ip)}" ${isConnecting ? 'disabled' : ''}>连接</button>`;
                 }
                 html += `<tr>
-                    <td>${idx+1}</td>
-                    <td>${rec.hostname}</td>
-                    <td>${rec.ip}</td>
-                    <td>${rec.country}</td>
-                    <td>${rec.start_time || "-"}</td>
-                    <td>${rec.end_time || "-"}</td>
-                    <td>${rec.duration || "-"}</td>
+                    <td>${pageOffset + idx + 1}</td>
+                    <td>${escapeHtml(rec.hostname)}</td>
+                    <td>${escapeHtml(rec.ip)}</td>
+                    <td>${escapeHtml(rec.country)}</td>
+                    <td>${escapeHtml(rec.start_time) || "-"}</td>
+                    <td>${escapeHtml(rec.end_time) || "-"}</td>
+                    <td>${escapeHtml(rec.duration) || "-"}</td>
                     <td>
                         ${connectBtnHtml}
-                        <button class="btn btn-sm ${prefBtnClass} pref-btn" data-ip="${rec.ip}" data-action="${action}">
+                        <button class="btn btn-sm ${prefBtnClass} pref-btn" data-ip="${escapeHtml(rec.ip)}" data-action="${action}">
                             ${btnText}
                         </button>
-                        <button class="btn btn-sm btn-danger del-btn" data-id="${rec.id}">删除</button>
+                        <button class="btn btn-sm btn-danger del-btn" data-id="${escapeHtml(rec.id)}">删除</button>
                     </td>
                 </tr>`;
             });
             tbody.innerHTML = html || "<tr><td colspan='8'>暂无记录</td></tr>";
         }
 
-        // 获取历史记录（支持排序）
-        async function loadHistory(sort = "start_time", order = "desc") {
+        function updateHistoryPagination(data) {
+            historyTotalPages = data.total_pages || 1;
+            historyPerPage = data.per_page || 50;
+            document.getElementById("history-page-info").textContent =
+                `共 ${data.total} 条记录，第 ${data.page}/${historyTotalPages} 页`;
+            document.getElementById("history-page-num").textContent = data.page;
+            document.getElementById("history-prev-btn").disabled = data.page <= 1;
+            document.getElementById("history-next-btn").disabled = data.page >= historyTotalPages;
+        }
+
+        async function loadHistory(sort, order, page) {
+            if (sort) historyCurrentSort = sort;
+            if (order) historyCurrentOrder = order;
+            if (page) historyCurrentPage = page;
+
             const status = document.getElementById("history-refresh-status");
             status.textContent = "加载中...";
             const table = document.getElementById("history-table");
-            table.classList.add("loading");   // 禁用表格操作
+            table.classList.add("loading");
             try {
-                const res = await fetch(`/api/connection_history?sort=${sort}&order=${order}`);
+                const res = await fetch(`/api/connection_history?sort=${historyCurrentSort}&order=${historyCurrentOrder}&page=${historyCurrentPage}&per_page=50`);
                 if (!res.ok) throw new Error((await res.json().catch(()=>{})).error || "HTTP " + res.status);
                 const data = await res.json();
-                renderHistoryTable(data);
+                renderHistoryTable(data.records || []);
+                updateHistoryPagination(data);
                 status.textContent = "";
             } catch(e) {
                 showMessage("加载失败", e.message, "danger");
                 status.textContent = "加载失败";
                 setTimeout(() => { status.textContent = ""; }, 2000);
             } finally {
-                table.classList.remove("loading");   // 恢复操作
+                table.classList.remove("loading");
             }
         }
 
@@ -1033,17 +1074,26 @@
                 const currentOrder = e.target.getAttribute("data-order") || "desc";
                 const newOrder = currentOrder === "desc" ? "asc" : "desc";
                 e.target.setAttribute("data-order", newOrder);
+                historyCurrentPage = 1;  // 排序变化时回到第一页
                 loadHistory(sortField, newOrder);
             }
         });
 
+        // 分页按钮
+        document.getElementById("history-prev-btn").addEventListener("click", () => {
+            if (historyCurrentPage > 1) loadHistory(null, null, historyCurrentPage - 1);
+        });
+        document.getElementById("history-next-btn").addEventListener("click", () => {
+            if (historyCurrentPage < historyTotalPages) loadHistory(null, null, historyCurrentPage + 1);
+        });
+
         // 操作按钮事件（委托）
         document.getElementById("history-table").addEventListener("click", async (e) => {
-                if (e.target.classList.contains("connect-btn-history")) {
-                    const ip = e.target.getAttribute("data-ip");
-                    if (ip) connectNode(ip);
-                    return;
-                }
+            if (e.target.classList.contains("connect-btn-history")) {
+                const ip = e.target.getAttribute("data-ip");
+                if (ip) connectNode(ip);
+                return;
+            }
             if (e.target.classList.contains("pref-btn")) {
                 const ip = e.target.getAttribute("data-ip");
                 const action = e.target.getAttribute("data-action");
@@ -1055,7 +1105,7 @@
                 const data = await res.json();
                 if (data.success) {
                     await loadPreferredIps();
-                    loadHistory(); // 重新渲染
+                    loadHistory();
                     showMessage("操作成功", action === "add" ? "已设为优先连接" : "已取消优先连接", "success");
                 } else {
                     showMessage("操作失败", data.error || "未知错误", "danger");
@@ -1074,18 +1124,16 @@
             }
         });
 
-        // 刷新记录按钮
         document.getElementById("refresh-history-btn").addEventListener("click", () => loadHistory());
-        // ---------- 监听标签页切换：当切换到节点列表时自动刷新 ----------
+
         document.addEventListener("DOMContentLoaded", () => {
             loadSettings();
-            loadHistoricalLogs();           // <-- 新增：加载历史日志
+            loadHistoricalLogs();
             updateAllNodesCache().then(() => refreshNodes());
             loadSystemInfo();
             loadPreferredIps();
             loadHistory();
 
-            // 监听标签页切换事件 (Bootstrap 5)
             document.querySelectorAll('#mainTab button[data-bs-toggle="tab"]').forEach(tabEl => {
                 tabEl.addEventListener('shown.bs.tab', (event) => {
                     const targetId = event.target.getAttribute('data-bs-target');
