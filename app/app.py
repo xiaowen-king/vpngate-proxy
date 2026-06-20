@@ -14,7 +14,7 @@ import signal
 from logging.handlers import TimedRotatingFileHandler
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 from flask_socketio import SocketIO, emit
-from config import load_config, save_config
+from config import load_config, save_config, get_safe_config
 from vpn_manager import VpnManager
 import subprocess
 
@@ -99,9 +99,15 @@ def status():
 def nodes():
     region = request.args.get("region", "all")
     try:
-        nodes = manager.filter_nodes(region)
+        node_list = manager.filter_nodes(region)
         limit = int(manager.config.get("node_limit", 200))
-        return jsonify(nodes[:limit])
+        # 前端不需要 openvpn_config_base64，去除以节省带宽和前端内存
+        display_fields = ("hostname", "ip", "score", "ping", "speed",
+                          "country_long", "country_short", "num_sessions",
+                          "uptime", "total_users", "total_traffic",
+                          "log_type", "operator", "message")
+        slim_nodes = [{k: n.get(k, "") for k in display_fields} for n in node_list[:limit]]
+        return jsonify(slim_nodes)
     except Exception as e:
         manager.log(f"API /api/nodes 异常: {str(e)}")
         return jsonify({"error": f"服务器内部错误: {str(e)}"}), 500
@@ -133,12 +139,18 @@ def disconnect():
 @login_required
 def handle_config():
     if request.method == "GET":
-        return jsonify(load_config())
+        # 返回脱敏配置，不暴露密码和密钥
+        return jsonify(get_safe_config())
     else:
         new_cfg = request.json
+        # 合并：前端未传的敏感字段保留原值（前端显示的是 ******）
+        current = load_config()
+        for sensitive_key in ("web_password", "vpn_pass", "secret_key"):
+            val = new_cfg.get(sensitive_key, "")
+            if not val or val == "******":
+                new_cfg[sensitive_key] = current.get(sensitive_key, "")
         manager.set_config(new_cfg)
         restart_needed = False
-        current = load_config()
         if new_cfg.get("socks_port") != current.get("socks_port") or \
            new_cfg.get("web_port") != current.get("web_port"):
             restart_needed = True
@@ -149,7 +161,8 @@ def handle_config():
 def restart():
     try:
         manager.stop()
-        time.sleep(1)
+        # stop() 内部 join 等待线程退出，额外等待确保完全清理
+        time.sleep(2)
         new_cfg = load_config()
         manager.set_config(new_cfg)
         threading.Thread(target=manager.start, daemon=True).start()
@@ -202,119 +215,101 @@ def system_info():
 @app.route("/api/logs")
 @login_required
 def get_logs():
-    """返回最近的日志内容（最多 1000 行）"""
+    """返回最近的日志内容（最多 1000 行），使用高效尾部读取避免内存暴涨"""
+    max_lines = 1000
     try:
         if not os.path.exists(LOG_FILE):
             return jsonify([])
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        # 取最后 1000 行，避免数据量过大
-        recent_lines = lines[-1000:]
-        return jsonify([line.strip() for line in recent_lines])
+        # 高效读取文件末尾，不将整个文件加载到内存
+        lines = _read_last_lines(LOG_FILE, max_lines)
+        return jsonify(lines)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/latency")
-@login_required
-def latency():
-    ms = manager.measure_latency()
-    return jsonify({"latency_ms": ms if ms > 0 else None})
 
-@app.route("/api/nodes_latency", methods=["POST"])
-@login_required
-def nodes_latency():
-    data = request.get_json()
-    ips = data.get("ips", [])
-    if not isinstance(ips, list) or len(ips) == 0:
-        return jsonify({"error": "需要提供 IP 列表"}), 400
-    # 安全上限，避免恶意请求
-    ips = ips[:500]
-    latencies = manager.measure_nodes_latency(ips)
-    return jsonify({"latencies": latencies})
+def _read_last_lines(filepath, n):
+    """高效读取文件最后 n 行，不将整个文件加载到内存"""
+    try:
+        with open(filepath, "rb") as f:
+            # 从文件末尾往前读取
+            f.seek(0, 2)  # 移到文件末尾
+            file_size = f.tell()
 
-@app.route("/api/speedtest")
-@login_required
-def speedtest():
-    import subprocess
-    import time
+            if file_size == 0:
+                return []
 
-    target = load_config().get("speedtest_url", "http://speed.cloudflare.com/__down?bytes=1048576")
-    socks_port = manager.config.get("socks_port", 1080)
-    max_retries = int(load_config().get("speedtest_retry", 3))
+            # 从末尾读取最多 512KB（日志行通常很短，512KB 足够 1000 行）
+            read_size = min(file_size, 512 * 1024)
+            f.seek(max(0, file_size - read_size))
+            data = f.read(read_size)
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            start = time.time()
-            result = subprocess.run(
-                ["curl", "-s", "--socks5", f"127.0.0.1:{socks_port}",
-                 "--max-time", "60", "-o", "/dev/null", "-w", "%{size_download}", target],
-                capture_output=True, text=True, timeout=70
-            )
-            elapsed = time.time() - start
+            text = data.decode("utf-8", errors="replace")
+            all_lines = text.splitlines()
 
-            if result.returncode == 0:
-                size_bytes = int(result.stdout.strip())
-                speed_mbps = round((size_bytes * 8) / (elapsed * 1_000_000), 2)
-                return jsonify({
-                    "speed_mbps": speed_mbps,
-                    "elapsed_sec": round(elapsed, 2),
-                    "size_bytes": size_bytes
-                })
+            # 如果读取的不是文件开头，第一行可能是不完整的，跳过
+            if file_size > read_size and len(all_lines) > 0:
+                all_lines = all_lines[1:]
 
-            # 失败则记录日志，继续重试（最后一次重试才返回错误）
-            error_msg = result.stderr.strip() or f"curl 退出码: {result.returncode}"
-            manager.log(f"测速失败 (第{attempt}次，共{max_retries}次): {error_msg}")
+            return [line.strip() for line in all_lines[-n:]]
+    except Exception:
+        # fallback：常规读取
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        return [line.strip() for line in lines[-n:]]
 
-        except Exception as e:
-            error_msg = str(e)
-            manager.log(f"测速异常 (第{attempt}次，共{max_retries}次): {error_msg}")
-
-        # 如果不是最后一次，等待 2 秒再重试
-        if attempt < max_retries:
-            time.sleep(5)
-
-    # 所有重试均失败
-    return jsonify({
-        "speed_mbps": None,
-        "error": f"经过 {max_retries} 次尝试仍失败"
-    })
 
 @socketio.on("connect")
 def handle_connect():
+    # 验证 WebSocket 连接的 session 认证
+    if not session.get("logged_in"):
+        return False  # 拒绝未认证的 WebSocket 连接
     emit("log", {"message": "WebSocket 已连接"})
 
 def run_app():
     port = int(load_config().get("web_port", 8080))
     socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-# 连接历史 API
+# 连接历史 API（支持分页）
 @app.route("/api/connection_history")
 @login_required
 def get_connection_history():
     sort_field = request.args.get("sort", "start_time")
     order = request.args.get("order", "desc")
+    page = max(1, int(request.args.get("page", 1)))
+    per_page = min(100, max(10, int(request.args.get("per_page", 50))))
+
     history = list(manager.connection_history)
     # 排序前确保字段可比较，None 替换为空字符串或 0
     reverse = (order == "desc")
     if sort_field == "start_time":
         history.sort(key=lambda x: x.get("start_time") or "", reverse=reverse)
     elif sort_field == "duration":
-        # 将 duration 转换为秒数进行比较，None 或 空字符串视为 0
         def duration_key(rec):
             dur = rec.get("duration")
             if not dur:
                 return 0
             try:
-                # 解析 HH:MM:SS 格式
                 parts = list(map(int, dur.split(':')))
                 if len(parts) == 3:
                     return parts[0] * 3600 + parts[1] * 60 + parts[2]
                 else:
                     return 0
-            except:
+            except Exception:
                 return 0
         history.sort(key=duration_key, reverse=reverse)
-    return jsonify(history)
+
+    total = len(history)
+    start = (page - 1) * per_page
+    end = start + per_page
+    paged = history[start:end]
+
+    return jsonify({
+        "records": paged,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total + per_page - 1) // per_page
+    })
 
 @app.route("/api/connection_history/<record_id>", methods=["DELETE"])
 @login_required
@@ -330,7 +325,7 @@ def handle_preferred_nodes():
         # 仅返回 IP 列表供前端显示
         ips = [node["ip"] for node in manager.preferred_nodes]
         return jsonify({"preferred_ips": ips})
-    
+
     data = request.json
     ip = data.get("ip")
     action = data.get("action")  # "add" 或 "remove"
@@ -352,6 +347,11 @@ def handle_preferred_nodes():
             return jsonify({"success": False, "error": "最多只能设置3个优先节点"})
         if any(n["ip"] == ip for n in manager.preferred_nodes):
             return jsonify({"success": True})  # 已存在
+        # 确保优先节点保存完整配置（含 base64），供后续重连使用
+        config_b64 = target_node.get("openvpn_config_base64") or manager._node_config_cache.get(ip, "")
+        if config_b64:
+            target_node = dict(target_node)  # copy
+            target_node["openvpn_config_base64"] = config_b64
         manager.preferred_nodes.append(target_node)
         manager.config["preferred_nodes"] = manager.preferred_nodes
         save_config(manager.config)
