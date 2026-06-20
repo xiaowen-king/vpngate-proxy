@@ -1,116 +1,65 @@
 # VPN Gate Proxy
 
-一个自动获取 [VPN Gate](https://www.vpngate.net/) 公共 VPN 节点、检测 IP 类型、自动连接并生成 SOCKS5 代理的 Docker 容器项目。提供 Web 面板进行可视化管理和实时监控。
+[![Docker Build](https://github.com/xiaowen-king/vpngate-proxy/actions/workflows/docker-build.yml/badge.svg)](https://github.com/xiaowen-king/vpngate-proxy/actions/workflows/docker-build.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 目前进度
+一个基于 Docker 的自动化 VPN 代理网关。自动获取 [VPN Gate](https://www.vpngate.net/) 公共 VPN 节点，建立 OpenVPN 隧道，并通过 SOCKS5 代理对外提供服务。内置 Web 管理面板，支持节点自动切换、健康检测、优先节点等高级功能。
 
-目前为测试阶段，已经可以正常使用，但是不知道是否稳定
+> **简而言之**：部署后，你只需在浏览器或应用中配置一个 SOCKS5 代理地址，即可自动通过全球公共 VPN 节点访问网络。节点故障时自动切换，无需人工干预。
 
-## 目前实现功能
+---
 
-### 功能概述
+## ✨ 核心功能
 
-通过api获取gate节点列表，自动连接节点并生成SK代理，当连接节点未通过健康检测达到一定次数后自动切换节点
+- **自动连接** — 启动后自动获取节点列表并建立 VPN 连接，连接失败时持续重试
+- **SOCKS5 代理** — 对外提供标准 SOCKS5 代理，支持任意客户端
+- **健康检测** — 定期通过代理访问检测 URL，连续失败自动切换节点
+- **优先节点** — 最多设置 3 个优先节点，优先连接，不可用时自动降级
+- **Web 面板** — 可视化管理界面，实时日志、节点列表、连接记录、设置管理
+- **同子网优先** — 切换节点时优先选择同一子网，减少 IP 跳变
+- **连接历史** — 记录每次连接的节点、时长，支持排序和分页
+- **速度测试** — 通过代理测试下载速度
+- **延迟检测** — 测试当前 VPN 隧道延迟
+- **自动重连** — 断线后自动重连，连续失败清空黑名单重试所有节点
+- **Docker 一键部署** — 开箱即用，支持 docker-compose
 
-### 仪表盘
-
-一、显示连接信息（连接状态、节点名称、IP地址、归属地、SK代理连接、节点连接时长、节点延迟、节点下载速度、断开连接按钮、连接按钮、重新连接按钮、延迟检测按钮、测试按钮）
-
-二、IP检测结果（ISP、是否为代理、国家、地区、城市、是否机房/托管、IP地址，是否移动网络）
-
-三、实时日志，实时显示连接日志，健康检测日志，获取节点日志等
-
-### 节点列表
-
-显示从aip获取的节点列表，可以在节点列表中手动切换节点，可以通过地区筛选节点，可以手动刷新节点
-
-### 设置
-
-一、可以自定义获取节点API链接
-
-二、可以SK代理端口
-
-三、可以自定义面板端口
-
-四、可以指定切换节点区域
-
-五、可以自定义获取节点数量，通过API获取的只有一百个左右
-
-六、可以自定义预备节点检测数量
-
-七、可以自定义更新节点列表时间
-
-八、可以自定义检点检测阈值，例如连续失败多少次切换节点
-
-九、可以自定义当前连接节点阈值检测间隔时间
-
-十、可以之定义检测网址，支持多个网址，当所有自定义网址使用SK代理访问都不可达达到一定数量判断节点不可用自动切换节点
-
-十一、自定义日志保存天数
-
-十二、可以自定义节点列表自动跟新间隔
-
-十三、可自定义测试链接
-
-十四、新增优先连接同网段IP节点开关，可以选择优先连接同网段节点，减少IP切换跨大地区问题
-
-十五、新增连接记录，可以在连接记录里面设置优先连接节点，最多可以设置三个，可以在连接记录里面直接点击“连接”按钮对设置了优先连接的节点进行连接，容器启动时会优先连接设置了优先的节点，当三个节点都不可用的时候才自动更具默认区域去随机连接节点，当优先节点1不可用的时候会自动切换到优先节点2，优先节点2不可用会自动切花到优先节点3，其中一个节点可用的时候会清空`_failed_ips`，当当前连接的优先节点不可用的时候会再次尝试其他两个优先节点，如果设置的三个节点对应的不同时段，那么按道理会一直连接的这三个节点。
-
-十六、新增设置可自定义SK最大并发量
-
-## 📁 项目结构
-
-```
-vpngate-proxy/
-├── .github/workflows/
-│ └── docker-build.yml            # GitHub Actions 自动构建并推送镜像
-├── app/
-│ ├── app.py                      # Flask Web 服务 & API & WebSocket
-│ ├── config.py                   # 配置读写，首次运行自动生成 secret_key
-│ ├── vpn_manager.py              # VPN 管理核心：节点获取、连接、健康检测、策略路由、SOCKS5
-│ ├── socks_server.py             # 极简 SOCKS5 服务器，出口绑定 VPN IP
-│ └── templates/
-│ ├── index.html                  # Web 控制面板（单页应用）
-│ └── login.html                  # 登录页
-├── Dockerfile
-├── requirements.txt
-└── README.md
-```
+---
 
 ## 🚀 快速开始
 
 ### 前提条件
 
-- 一台 Linux 主机（或任何支持 Docker 的设备并安装了docker）
-- 需要暴露的端口未被占用（默认 `8080` 用于面板，`1080` 用于 SOCKS5）
+- 安装了 Docker 的 Linux 主机（推荐）或任何支持 Docker 的设备
+- 默认需要端口：`8080`（Web 面板）、`1080`（SOCKS5 代理）
 
-### 使用预构建镜像（推荐）
+### 方式一：使用预构建镜像（推荐）
 
-```
+```bash
 docker run -d --name vpn-proxy \
   --cap-add=NET_ADMIN --device=/dev/net/tun \
   -p 8080:8080 -p 1080:1080 \
   -v ./data:/data \
   ghcr.io/xiaowen-king/vpngate-proxy:latest
 ```
-### 从源码构建
 
-```
+### 方式二：从源码构建
+
+```bash
 git clone https://github.com/xiaowen-king/vpngate-proxy.git
 cd vpngate-proxy
 docker build -t vpngate-proxy .
 docker run -d --name vpn-proxy \
-  --cap-add=NET_ADMIN \
-  --device=/dev/net/tun \
-  -p 8080:8080 \
-  -p 1080:1080 \
+  --cap-add=NET_ADMIN --device=/dev/net/tun \
+  -p 8080:8080 -p 1080:1080 \
   -v ./data:/data \
   vpngate-proxy
 ```
 
-### 使用docker-compose.yaml文件
+### 方式三：Docker Compose
 
-```
+创建 `docker-compose.yml`：
+
+```yaml
 services:
   vpn-proxy:
     image: ghcr.io/xiaowen-king/vpngate-proxy:latest
@@ -127,31 +76,201 @@ services:
     restart: unless-stopped
 ```
 
-## 界面展示
+然后执行：
 
-![1](https://github.com/xiaowen-king/vpngate-proxy/blob/main/images/1.png)
+```bash
+docker compose up -d
+```
 
-![2](https://github.com/xiaowen-king/vpngate-proxy/blob/main/images/2.png)
+### 首次使用
 
-![3](https://github.com/xiaowen-king/vpngate-proxy/blob/main/images/3.png)
+1. 访问 `http://<你的IP>:8080`，默认密码：`admin`
+2. 进入「设置」页面，填入 VPN Gate API 地址（见下方说明）
+3. 保存设置，系统自动开始获取节点并连接
+4. 连接成功后，在你的应用中配置代理：`socks5://<你的IP>:1080`
 
-![4](https://github.com/xiaowen-king/vpngate-proxy/blob/main/images/4.png)
+---
 
-![5](https://github.com/xiaowen-king/vpngate-proxy/blob/main/images/5.png)
+## 🖥️ 界面预览
 
-## 常见问题
+| 仪表盘 | 节点列表 |
+|:---:|:---:|
+| ![仪表盘](images/1.png) | ![节点列表](images/2.png) |
 
-### 一、使用vpngate的aip链接（https://www.vpngate.net/api/iphone/）获取不到节点信息怎么办？
+| 连接记录 | 设置 |
+|:---:|:---:|
+| ![连接记录](images/3.png) | ![设置](images/4.png) |
 
-如果使用vpngate的api链接获取不到节点信息是被屏蔽了，可以利用CF（cloudflare）免费的Workers 和 Pages来做中转
+---
 
-中转代码如下：
+## ⚙️ 设置说明
+
+所有设置在 Web 面板的「设置」页面中配置，保存后生效。
+
+### 基础设置
+
+| 设置项 | 默认值 | 生效方式 | 说明 |
+|---|---|---|---|
+| 面板密码 | `admin` | 即时 | Web 面板登录密码 |
+| API 地址 | 空 | 即时 | VPN Gate 节点 API 地址 |
+| VPN 用户名 | 空 | 即时 | OpenVPN 认证用户名（大多数节点不需要） |
+| VPN 密码 | 空 | 即时 | OpenVPN 认证密码 |
+| 默认连接地区 | `all` | 即时 | 筛选节点的国家/地区 |
+
+### 网络设置
+
+| 设置项 | 默认值 | 生效方式 | 说明 |
+|---|---|---|---|
+| SOCKS 端口 | `1080` | **重启** | SOCKS5 代理监听端口 |
+| SOCKS 最大并发连接数 | `200` | **重启** | 同时代理连接数上限 |
+| 面板端口 | `8080` | **重启** | Web 面板监听端口 |
+
+### 节点管理
+
+| 设置项 | 默认值 | 生效方式 | 说明 |
+|---|---|---|---|
+| 节点数据上限 | `200` | 即时 | 从 API 获取的最大节点数 |
+| 检测数量上限 | `20` | 即时 | 后台预扫描的节点数 |
+| 自动更新节点间隔 | `0`（关闭） | 即时 | 定时刷新节点列表（分钟） |
+| 优先连接同 IP 段节点 | 关闭 | 即时 | 切换时优先选择同子网节点 |
+| 子网前缀长度 | `24` | 即时 | 同子网判断范围（/24 = 前三段相同） |
+
+### 健康检测
+
+| 设置项 | 默认值 | 生效方式 | 说明 |
+|---|---|---|---|
+| 健康检测失败阈值 | `3` | 即时 | 连续失败多少次后切换节点 |
+| 健康检测间隔 | `10` 秒 | 即时 | 每次检测的间隔时间 |
+| 自定义健康检测地址 | 空 | 即时 | 自定义检测 URL（逗号或换行分隔） |
+| 健康检测超时 | `8` 秒 | 即时 | 单次检测的最大等待时间 |
+| 未连接时重连间隔 | `30` 秒 | 即时 | 断线后自动重连的等待时间 |
+
+### 测试与日志
+
+| 设置项 | 默认值 | 生效方式 | 说明 |
+|---|---|---|---|
+| 延迟检测地址 | 空（VPN 网关） | 即时 | ping 测试的目标地址 |
+| 测速文件地址 | CacheFly 1MB | 即时 | 下载测速的文件 URL |
+| 测速重试次数 | `3` | 即时 | 测速失败的重试次数 |
+| 日志保存天数 | `3` | **重启** | 日志文件保留天数 |
+| 连接记录保留天数 | `30` | 即时 | 超期记录自动清理 |
+
+---
+
+## 📁 项目结构
 
 ```
+vpngate-proxy/
+├── .github/workflows/
+│   ├── docker-build.yml            # CI：推送 main 时自动构建镜像
+│   └── docker-build-tag.yml        # CI：推送 tag 时构建发布镜像
+├── app/
+│   ├── app.py                      # Flask Web 服务 & REST API & WebSocket
+│   ├── config.py                   # 配置读写，原子写入，敏感字段脱敏
+│   ├── vpn_manager.py              # VPN 核心：节点获取、连接、健康检测、策略路由
+│   ├── socks_server.py             # SOCKS5 代理服务器
+│   └── templates/
+│       ├── index.html              # Web 管理面板（单页应用）
+│       └── login.html              # 登录页
+├── images/                         # README 截图
+├── Dockerfile                      # 容器构建文件
+├── requirements.txt                # Python 依赖
+└── README.md
+```
+
+---
+
+## 🔧 技术架构
+
+```
+┌──────────────┐     HTTP/WS      ┌──────────────┐     subprocess     ┌──────────────┐
+│   浏览器      │ ◄──────────────► │  Flask       │ ◄────────────────► │  OpenVPN      │
+│   Web 面板    │                  │  SocketIO    │                    │  隧道进程      │
+└──────────────┘                  └──────────────┘                    └──────────────┘
+                                       │                                    │
+                                       ▼                                    ▼
+                                 ┌──────────────┐                    ┌──────────────┐
+                                 │  VpnManager  │                    │  tun 接口     │
+                                 │  核心引擎     │                    │  策略路由     │
+                                 └──────────────┘                    └──────────────┘
+                                       │                                    │
+                                       ▼                                    ▼
+                                 ┌──────────────┐                    ┌──────────────┐
+                                 │  JSON 文件    │                    │  SOCKS5 代理  │
+                                 │  配置 + 历史  │                    │  出口绑定 VPN │
+                                 └──────────────┘                    └──────────────┘
+                                                                          │
+                                                                          ▼
+                                                                   ┌──────────────┐
+                                                                   │   外部网络    │
+                                                                   │  通过 VPN 出口│
+                                                                   └──────────────┘
+```
+
+### 策略路由原理
+
+```
+默认路由 (table main):
+  default via 192.168.1.1 dev eth0
+  → 容器管理流量走这条（API 请求、健康检测）
+
+策略路由 (table 100):
+  ip rule: from 10.8.0.2 table 100
+  ip route: default via 10.8.0.1 dev tun0 table 100
+  → SOCKS5 代理流量走 VPN 隧道
+```
+
+SOCKS5 代理的出口绑定到 VPN 隧道 IP，流量自动匹配策略路由，确保代理流量走 VPN，管理流量走直连。
+
+---
+
+## 📡 API 接口
+
+所有接口需要登录认证（Session Cookie）。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET/POST | `/login` | 登录 |
+| GET | `/logout` | 退出 |
+| GET | `/api/status` | 当前连接状态 |
+| GET | `/api/nodes?region=XX` | 节点列表（支持地区筛选） |
+| POST | `/api/connect` | 连接指定节点 `{ip}` |
+| POST | `/api/disconnect` | 断开连接 |
+| POST | `/api/auto_connect` | 自动连接 |
+| GET/POST | `/api/config` | 读取/保存配置 |
+| POST | `/api/restart` | 重启服务 |
+| GET | `/api/latency` | 延迟检测 |
+| POST | `/api/nodes_latency` | 批量延迟检测 `{ips: [...]}` |
+| GET | `/api/speedtest` | 下载速度测试 |
+| GET | `/api/logs` | 最近日志（最多 1000 行） |
+| GET | `/api/system` | 系统信息 |
+| GET | `/api/connection_history` | 连接历史（支持分页排序） |
+| DELETE | `/api/connection_history/<id>` | 删除历史记录 |
+| GET/POST | `/api/preferred_nodes` | 管理优先节点 |
+
+---
+
+## 🛡️ 安全说明
+
+- Web 面板密码哈希比较（注意：当前为明文存储，建议在反向代理后使用）
+- REST API 和 WebSocket 均需登录认证
+- 配置文件原子写入，防止损坏
+- 连接历史文件原子写入
+- 敏感配置（密码、密钥）API 返回时脱敏
+
+---
+
+## 🌐 API 地址获取
+
+VPN Gate 的 API 地址：`https://www.vpngate.net/api/iphone/`
+
+如果该地址被屏蔽，可以使用 Cloudflare Workers 做中转。在 Cloudflare Workers 中部署以下代码：
+
+```javascript
 export default {
   async fetch(request, env, ctx) {
     const TARGET_URL = "http://www.vpngate.net/api/iphone";
-    
+
     const headers = {
       "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15",
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -159,19 +278,17 @@ export default {
 
     try {
       const response = await fetch(TARGET_URL, { headers, timeout: 8000 });
-      
+
       if (!response.ok) {
-        return new Response(`CF 边缘节点抓取失败，状态码: ${response.status}`, { status: 502 });
+        return new Response(`抓取失败，状态码: ${response.status}`, { status: 502 });
       }
 
       const rawText = await response.text();
 
-      // 2. 刚性校验：防止抓到混淆的 SOAP 加密串或空白页
       if (!rawText.includes("#HostName") || !rawText.includes("OpenVPN_ConfigData_Base64")) {
-        return new Response("抓取成功但数据已被混淆劫持，非合规 CSV 格式", { status: 502 });
+        return new Response("数据格式异常", { status: 502 });
       }
 
-      // 3. 将洗白后的标准文本流，套上防嗅探请求头，干净地吐给你的 Linux 服务器
       return new Response(rawText, {
         status: 200,
         headers: {
@@ -180,18 +297,68 @@ export default {
           "Cache-Control": "no-cache, no-store, must-revalidate"
         }
       });
-
     } catch (error) {
-      return new Response(`CF 算力中转发生崩溃: ${error.message}`, { status: 500 });
+      return new Response(`中转错误: ${error.message}`, { status: 500 });
     }
   }
 };
 ```
 
-### 二、当前连接的节点不在节点列表里面
+部署后将 Workers 的 URL 填入设置中的「API 地址」即可。
 
-这种情况正常，因为gate的节点非常多，但是gate的API只能每次获取一百个节点左右，只要当前节点通过健康检测就可以正常使用
+---
+
+## ❓ 常见问题
+
+### 连接节点不在节点列表中？
+
+正常现象。VPN Gate 每次 API 返回约 100 个节点，但节点总量远超此数。只要当前节点通过健康检测，即可正常使用。
+
+### 提示"所有节点均连接失败"？
+
+1. 检查 API 地址是否正确且可访问
+2. 检查容器是否有网络连接
+3. 尝试切换地区（如从 `all` 切换到 `JP`、`US` 等）
+4. 等待几分钟后重试（节点列表会自动刷新）
+
+### 如何查看实时日志？
+
+访问 Web 面板 → 仪表盘 → 右侧实时日志面板，或查看容器日志：
+
+```bash
+docker logs -f vpn-proxy
+```
+
+### 如何更新到最新版本？
+
+```bash
+docker pull ghcr.io/xiaowen-king/vpngate-proxy:latest
+docker stop vpn-proxy && docker rm vpn-proxy
+# 重新执行 docker run 命令
+```
+
+使用 docker-compose 时：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+---
+
+## 📄 开源协议
+
+本项目基于 [MIT License](LICENSE) 开源。
+
+---
 
 ## 联系方式
 
 邮箱：239972420@qq.com
+
+## 致谢
+
+- [VPN Gate](https://www.vpngate.net/) — 提供公共 VPN 节点服务
+- [OpenVPN](https://openvpn.net/) — VPN 隧道
+- [Flask](https://flask.palletsprojects.com/) — Web 框架
+- [Bootstrap](https://getbootstrap.com/) — 前端 UI 框架
