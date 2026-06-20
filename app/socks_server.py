@@ -1,4 +1,3 @@
-import asyncio
 import socket
 import struct
 import threading
@@ -17,7 +16,7 @@ log_dir = "/data/logs"
 os.makedirs(log_dir, exist_ok=True)
 
 logger = logging.getLogger("socks_server")
-logger.setLevel(logging.INFO)   # 保持原有级别
+logger.setLevel(logging.INFO)
 
 error_log_file = os.path.join(log_dir, "socks-errors.log")
 # 避免重复添加 handler
@@ -38,6 +37,7 @@ if not any(isinstance(h, TimedRotatingFileHandler) and h.baseFilename == os.path
 # 阻止错误消息传播到根 logger（主日志文件）
 logger.propagate = False
 # -----------------------------------------
+
 
 class Socks5Server:
     """极简 SOCKS5 代理，出口流量绑定到指定接口 IP，支持最大并发连接数限制"""
@@ -67,7 +67,10 @@ class Socks5Server:
     def stop(self):
         self.running = False
         if self.server_socket:
-            self.server_socket.close()
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
         logger.info("SOCKS5 server stopped")
 
     def _accept_loop(self):
@@ -76,7 +79,6 @@ class Socks5Server:
                 client_sock, addr = self.server_socket.accept()
                 with self.lock:
                     if self.active_connections >= self.max_connections:
-                        # 超过最大连接数，直接关闭新连接
                         client_sock.close()
                         continue
                     self.active_connections += 1
@@ -100,61 +102,52 @@ class Socks5Server:
         return data
 
     def _handle_client(self, client_sock):
+        remote = None
         try:
             # ---- 握手阶段 ----
             header = self._recv_exact(client_sock, 2)
             if not header or header[0] != 0x05:
-                client_sock.close()
                 return
             n_methods = header[1]
             methods = self._recv_exact(client_sock, n_methods)
             if not methods:
-                client_sock.close()
                 return
             if 0x00 in methods:
                 client_sock.sendall(b"\x05\x00")
             else:
                 client_sock.sendall(b"\x05\xff")
-                client_sock.close()
                 return
 
             # ---- 请求阶段 ----
             req_header = self._recv_exact(client_sock, 4)
             if not req_header or req_header[0] != 0x05:
-                client_sock.close()
                 return
             cmd = req_header[1]
             if cmd != 0x01:  # 只支持 CONNECT
                 self._send_reply(client_sock, 0x07)
-                client_sock.close()
                 return
 
             addr_type = req_header[3]
             if addr_type == 0x01:  # IPv4
                 addr_data = self._recv_exact(client_sock, 4)
                 if not addr_data:
-                    client_sock.close()
                     return
                 target_addr = socket.inet_ntoa(addr_data)
             elif addr_type == 0x03:  # 域名
                 name_len_byte = self._recv_exact(client_sock, 1)
                 if not name_len_byte:
-                    client_sock.close()
                     return
                 name_len = name_len_byte[0]
                 addr_data = self._recv_exact(client_sock, name_len)
                 if not addr_data:
-                    client_sock.close()
                     return
                 target_addr = addr_data.decode()
             else:
                 self._send_reply(client_sock, 0x08)
-                client_sock.close()
                 return
 
             port_data = self._recv_exact(client_sock, 2)
             if not port_data:
-                client_sock.close()
                 return
             target_port = struct.unpack(">H", port_data)[0]
 
@@ -177,16 +170,22 @@ class Socks5Server:
         except Exception as e:
             logger.error(f"SOCKS5 handling error: {e}")
         finally:
-            try:
-                client_sock.close()
-            except:
-                pass
+            # 确保 client 和 remote socket 都被关闭，防止 fd 泄漏
+            for sock in (client_sock, remote):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
             with self.lock:
                 self.active_connections -= 1
 
     def _send_reply(self, sock, rep):
         """发送错误响应"""
-        sock.sendall(struct.pack("!BBBBIH", 0x05, rep, 0x00, 0x01, 0, 0))
+        try:
+            sock.sendall(struct.pack("!BBBBIH", 0x05, rep, 0x00, 0x01, 0, 0))
+        except Exception:
+            pass
 
     def _relay(self, a, b):
         """双向转发数据，任一方向关闭则结束"""
